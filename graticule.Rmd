@@ -30,44 +30,74 @@ library(data.table)
 ```
 
 
+# Load data
 
 ```{r step 1: read data, warning = FALSE}
 encounter_table = read.csv("~/projects/graticule/encounter_table.csv")
 patient_table = read.csv("~/projects/graticule/patient_table.csv")
 
+```
+Use `read.csv` function in `R` to load csv files into datasets.
 
+
+
+# Median age for exposed cohort
+
+
+```{r median}
 
 #1. Compute median age at index date for the exposed cohort (including CI at 95% confidence level)
 exposed_cohort = encounter_table[encounter_table$exposure == "True", ]
 # nrow(exposed_cohort) # 58 members in exp cohort
+# Join birthday to calculate age
 exposed_cohort_bday = merge(exposed_cohort, patient_table, by = "patientid", all.x = TRUE) 
+
+# push date format
 exposed_cohort_bday$birthdate = as.Date(exposed_cohort_bday$birthdate, "%Y-%m-%d")
 exposed_cohort_bday$encounterdate = as.Date(exposed_cohort_bday$encounterdate, "%Y-%m-%d")
 exposed_cohort_bday$deceaseddate = as.Date(exposed_cohort_bday$deceaseddate, "%Y-%m-%d")
 
+# calculate age
 exposed_cohort_bday$age_at_index = as.numeric(round((exposed_cohort_bday$encounterdate - exposed_cohort_bday$birthdate)/365.25, 1))
-summary(exposed_cohort_bday$age_at_index)
+# summary(exposed_cohort_bday$age_at_index)
+print("median age of exposed cohort")
 median(exposed_cohort_bday$age_at_index)
-
-# 95% CI for mean
-xbar = mean(exposed_cohort_bday$age_at_index)
-ci_level = 0.95
-n = nrow(exposed_cohort_bday)
-margin = qt(1 - (1-ci_level)/2, df = n) * sd(exposed_cohort_bday$age_at_index)/sqrt(n)
-c(xbar - margin, xbar+ margin)
-
 
 # 95% CI for median
 # https://www.statology.org/confidence-interval-for-median/
 #j and k
 q = 0.5 # for median
+ci_level = 0.95
+n = nrow(exposed_cohort_bday)
+
 j = round(n * q - qnorm(1 - (1-ci_level)/2) * sqrt(n * q * (1-q)))
 k = round(n * q + qnorm(1 - (1-ci_level)/2) * sqrt(n * q * (1-q)))
 #c(j, k) # 22th and 36th observation
+print(" 95% confidence for median")
 exposed_cohort_bday$age_at_index[c(j,k)]
 
+```
+
+Ask: Compute median age at index date for the exposed cohort (and 95% confidence interval)
 
 
+Age at index date is defined as `(encounterdate - birthday)/365.25`. Median age of exposed cohort = `r median(exposed_cohort_bday$age_at_index)`. The `r round(ci_level*100)`% confidence interval of **median** can be calculated from the observation ([reference](https://www.statology.org/confidence-interval-for-median/)). The `r round(ci_level*100)`% confidence interval of **median** is between `r {j}`th and `r k`th observations, which is (`r exposed_cohort_bday$age_at_index[j]`, `r exposed_cohort_bday$age_at_index[k]`).
+
+
+```{r mean}
+# 95% CI for mean
+xbar = mean(exposed_cohort_bday$age_at_index)
+margin = qt(1 - (1-ci_level)/2, df = n-1) * sd(exposed_cohort_bday$age_at_index)/sqrt(n)
+print(" 95% confidence for mean")
+round(c(xbar - margin, xbar+ margin), 1)
+
+```
+The `r round(ci_level*100)`% confidence interval of **mean** can be calculated directed by x_bar ± $t_{n-1}$ * $\frac{s}{\sqrt{n}}$, where $t_{n-1}$ is the quantile of t-distribution with $n-1$ degree of freedom. Mean age of exposed cohort = `r round(xbar, 1)` and 
+`r round(ci_level*100)`% confidence interval = (`r round(xbar-margin, 1)`, `r round(xbar+margin, 1)`).
+
+
+# Aggregate time at risk
+```{r}
 # Compute aggregate time at risk for the exposed cohort, in person-days
 # for deceased patient, time at risk = deceased_date - index_date
 # for non-deceased patient, time at risk = study_end_date - index_date
@@ -78,17 +108,33 @@ exposed_cohort_bday$last_day_at_risk = pmin(exposed_cohort_bday$deceaseddate, as
 
 total_time_at_risk = as.numeric(sum(exposed_cohort_bday$last_day_at_risk - exposed_cohort_bday$encounterdate))
 
+print(" aggregate time at risk for the exposed cohort, in person-days")
 total_time_at_risk
 
-
-###
-
-# provide pseudo-code to select a 1:1 unexposed cohort based on the method outlined above.
-# * Exposed subjects are exact matched with unexposed subjects based on age, gender, and a healthcare encounter within the same week
-# * Matching is performed without replacement
-# * Exposed subjects may serve as unexposed matches during any week before the week of their exposure date
-
 ```
+
+Time at risk is defined as the the time between encounterdate and min(deceased_date, "2022-12-31"). If the patient died before 2022-12-31, then his/her time at risk would be truncated at the death date. The total time at risk = `r {format(total_time_at_risk, scientific=FALSE)}`.
+
+
+
+
+
+
+# Pseudo-code
+Provide pseudo-code to select a 1:1 unexposed cohort based on the method outlined above.
+
+
+General idea: First join the exposed cohort to unexposed cohort by age, gender and year-week. Then do another self join of exposed cohort to identify potential matches from the weeks prior. Finally, dedup the table to make sure that each patient (regardless of exposed or not) would be matched once so that the matches are without replacement.
+
+
+
+- Step 1: Calculate the year-week number of healthcare encounter for each patient
+    - example sql code: select concat(DATEPART(year, encounterdate), '-', DATEPART(week, encounterdate)) as year_week
+- Step 2: Join exposed cohort to unexposed cohort by identical age, gender, and year-week. Assign the unexposed patient id to "match_id".
+- Step 3: Join exposed cohort (table index) to itself (table history) by age, gender, and year-week (history's year-week needs to be less than index's year-week). Assign the patient id from history table to "match_id".
+    - example sql code: select index.*, history.patientid as match_id from encounter_table as index join encounter_table as history on index.age = histroy.age and index.gender = history.gender and index.history.year_week > history.year_week
+- Step 4: Union step 2 and step 3, and then dedup by match_id (so that the matches are without replacement)
+
 
 
 
